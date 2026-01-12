@@ -66,13 +66,13 @@ def fetch_with_retry(service, **kwargs) -> dict:
 
 
 def fetch_all_files(service) -> list[dict]:
-    """Fetch all files from My Drive with pagination."""
+    """Fetch all files from My Drive and Shared with me, with pagination."""
     all_files = []
     page_token = None
     page_count = 0
 
     fields = "nextPageToken, files(id, name, md5Checksum, size, parents, createdTime, modifiedTime, mimeType)"
-    query = "trashed = false and 'me' in owners"
+    query = "trashed = false"
 
     while True:
         page_count += 1
@@ -234,7 +234,7 @@ def main():
         description="Find duplicate files in Google Drive using MD5 checksums"
     )
     parser.add_argument(
-        "--path", "-p", help="Scan specific path (default: entire My Drive)"
+        "--path", "-p", help="Scan specific path (default: all files)"
     )
     parser.add_argument(
         "--output", "-o", default=".output/duplicates.csv", help="Output CSV file"
