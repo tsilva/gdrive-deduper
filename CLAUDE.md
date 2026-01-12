@@ -8,22 +8,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install dependencies
 uv sync
 
-# Run the deduplication scan
+# Run the web UI (Gradio-based deduplication manager)
+uv run app.py
+
+# Run the CLI deduplication scan
 uv run main.py
 
-# Scan specific folder
+# Scan specific folder (CLI)
 uv run main.py --path "/Photos"
 
-# Custom output file
+# Custom output file (CLI)
 uv run main.py --output .output/custom.csv
 
-# Use different credentials file
+# Use different credentials file (CLI)
 uv run main.py --credentials path/to/creds.json
 ```
 
+**Note:** PDF preview in the web UI requires poppler: `brew install poppler` (macOS)
+
 ## Architecture
 
-Single-file Python tool (`main.py`) that uses Google Drive API v3 to find duplicate files.
+Two interfaces for finding and managing duplicate files in Google Drive:
+
+### CLI Tool (`main.py`)
+Fast scanning tool that outputs duplicate pairs to CSV.
 
 **Flow:**
 1. OAuth authentication (cached in `token.json`)
@@ -32,11 +40,21 @@ Single-file Python tool (`main.py`) that uses Google Drive API v3 to find duplic
 4. Group files by MD5 checksum
 5. Output CSV with all duplicate pairs
 
+### Web UI (`app.py`)
+Gradio-based interface for the full deduplication workflow.
+
+**Features:**
+- **Scan Tab:** Run scans with progress feedback
+- **Review Tab:** Side-by-side file comparison with previews, make keep/skip decisions
+- **Export Tab:** Generate decisions.json for later execution
+
 **Key design decisions:**
-- Uses `drive.metadata.readonly` scope (read-only, no file content access)
+- Uses `drive.readonly` scope (allows file content download for preview)
 - Fetches all files in one query then filters locally (faster than recursive folder traversal)
 - Path resolution uses memoization (`path_cache`) for efficiency
 - Files with same MD5 but different size marked as "uncertain"
 - Google Workspace files (Docs, Sheets) skipped (no MD5 available)
+- Decisions auto-save to `.output/decisions.json` (resume sessions)
+- File previews cached in `.output/preview_cache/`
 
-**Output:** `.output/duplicates.csv` - folder tracked by git, contents ignored.
+**Output:** `.output/duplicates.csv` (scan results), `.output/decisions.json` (user decisions)
