@@ -920,6 +920,12 @@ def create_ui():
         gr.Markdown("---")
         gr.Markdown("*Tip: Previous scan results are automatically loaded on startup. Rescan to refresh data.*")
 
+        # Load initial display on startup if scan results exist
+        app.load(
+            fn=update_review_display,
+            outputs=review_outputs,
+        ).then(fn=get_stats_display, outputs=[stats_display])
+
     return app
 
 
