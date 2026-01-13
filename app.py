@@ -849,6 +849,128 @@ def ensure_folder_path(service, path: str, dupes_root_id: str, folder_cache: dic
     return current_parent_id
 
 
+BATCH_SIZE = 100  # Google Drive API limit per batch request
+
+
+def batch_get_parents(service, file_ids: list[str]) -> dict[str, str]:
+    """Batch fetch parent IDs for multiple files.
+
+    Returns: dict mapping file_id -> comma-separated parent IDs (or empty string if orphaned)
+    """
+    from googleapiclient.errors import HttpError
+    import time
+
+    results = {}
+    errors = {}
+
+    def callback(request_id, response, exception):
+        file_id = request_id
+        if exception is not None:
+            errors[file_id] = str(exception)
+            results[file_id] = ""  # Treat as orphaned on error
+        else:
+            parents = response.get("parents", [])
+            results[file_id] = ",".join(parents)
+
+    # Process in chunks of BATCH_SIZE
+    for i in range(0, len(file_ids), BATCH_SIZE):
+        chunk = file_ids[i : i + BATCH_SIZE]
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                batch = service.new_batch_http_request(callback=callback)
+                for file_id in chunk:
+                    batch.add(
+                        service.files().get(fileId=file_id, fields="parents"),
+                        request_id=file_id,
+                    )
+                batch.execute()
+                break  # Success, exit retry loop
+            except HttpError as e:
+                if e.resp.status in (429, 403) and "rate" in str(e).lower():
+                    wait_time = 2**attempt
+                    time.sleep(wait_time)
+                else:
+                    # Non-rate-limit error, mark all in chunk as failed
+                    for file_id in chunk:
+                        if file_id not in results:
+                            errors[file_id] = str(e)
+                            results[file_id] = ""
+                    break
+
+    return results
+
+
+def batch_move_files(
+    service,
+    move_requests: list[tuple[str, str, str]],
+) -> dict[str, dict]:
+    """Batch move multiple files to their target folders.
+
+    Args:
+        service: Google Drive API service
+        move_requests: List of (file_id, target_folder_id, previous_parents) tuples
+
+    Returns: dict mapping file_id -> {"success": bool, "error": str or None}
+    """
+    from googleapiclient.errors import HttpError
+    import time
+
+    results = {}
+
+    def callback(request_id, response, exception):
+        file_id = request_id
+        if exception is not None:
+            results[file_id] = {"success": False, "error": str(exception)}
+        else:
+            results[file_id] = {"success": True, "error": None}
+
+    # Process in chunks of BATCH_SIZE
+    for i in range(0, len(move_requests), BATCH_SIZE):
+        chunk = move_requests[i : i + BATCH_SIZE]
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                batch = service.new_batch_http_request(callback=callback)
+                for file_id, target_folder_id, previous_parents in chunk:
+                    if previous_parents:
+                        batch.add(
+                            service.files().update(
+                                fileId=file_id,
+                                addParents=target_folder_id,
+                                removeParents=previous_parents,
+                                fields="id, parents",
+                            ),
+                            request_id=file_id,
+                        )
+                    else:
+                        # Orphaned file, just add new parent
+                        batch.add(
+                            service.files().update(
+                                fileId=file_id,
+                                addParents=target_folder_id,
+                                fields="id, parents",
+                            ),
+                            request_id=file_id,
+                        )
+                batch.execute()
+                break  # Success, exit retry loop
+            except HttpError as e:
+                if e.resp.status in (429, 403) and "rate" in str(e).lower():
+                    wait_time = 2**attempt
+                    time.sleep(wait_time)
+                else:
+                    # Non-rate-limit error, mark all in chunk as failed
+                    for file_id, _, _ in chunk:
+                        if file_id not in results:
+                            results[file_id] = {"success": False, "error": str(e)}
+                    break
+
+    return results
+
+
 def move_file_to_dupes(service, file_id: str, target_folder_id: str) -> dict:
     """Move a file to the target folder in _dupes.
 
@@ -937,37 +1059,40 @@ def save_execution_log(results: list[dict], dry_run: bool):
         json.dump(data, f, indent=2)
 
 
-def execute_moves(dry_run: bool, progress=gr.Progress()) -> tuple[str, str]:
+def execute_moves(dry_run: bool, progress=gr.Progress()) -> tuple[str, list]:
     """Execute the move operation.
 
     If dry_run=True, only prepares and displays the plan.
     If dry_run=False, actually performs the moves.
 
-    Returns: (status_message, detailed_results)
+    Returns: (status_message, table_data)
     """
     # Get files to move from decisions
     _, _, delete_files = get_export_summary()
 
     if not delete_files:
-        return "No files to move.", ""
+        return "No files to move.", []
 
     # Prepare plan
     plan = prepare_execution_plan(delete_files)
 
     if not plan:
-        return "No files to move (all already in _dupes or no valid files).", ""
+        return "No files to move (all already in _dupes or no valid files).", []
 
     if dry_run:
-        # Format dry-run output
-        lines = ["### Dry Run - Files that would be moved:\n"]
-        for item in plan[:100]:
-            lines.append(f"- `{item['source_path']}` → `{item['dest_path']}`")
-        if len(plan) > 100:
-            lines.append(f"\n... and {len(plan) - 100} more files")
+        # Format dry-run output as table data
+        table_data = []
+        for item in plan:
+            table_data.append([
+                "PENDING",
+                item["source_path"],
+                item["dest_path"],
+                format_size(item["size"]),
+            ])
 
         total_size = sum(f["size"] for f in plan)
-        lines.append(f"\n**Total: {len(plan)} files, {format_size(total_size)}**")
-        return "Dry run complete. Review the plan above, then click Execute to move files.", "\n".join(lines)
+        status = f"**Dry run complete.** {len(plan)} files ({format_size(total_size)}) would be moved. Review the table below, then click Execute to move files."
+        return status, table_data
 
     # Actual execution
     if not ensure_service():
@@ -985,58 +1110,87 @@ def execute_moves(dry_run: bool, progress=gr.Progress()) -> tuple[str, str]:
     failed = 0
     skipped = 0
 
-    for i, item in enumerate(plan):
-        progress((i + 1) / len(plan), desc=f"Moving {i + 1}/{len(plan)}: {item['name'][:30]}...")
-
-        # Check if file is already in _dupes
+    # Filter out files already in _dupes
+    files_to_move = []
+    for item in plan:
         if item["source_path"].startswith("/_dupes/"):
             skipped += 1
             results.append({"path": item["source_path"], "status": "skipped", "reason": "already in _dupes"})
-            continue
+        else:
+            files_to_move.append(item)
 
+    if not files_to_move:
+        save_execution_log(results, dry_run=False)
+        return f"All {skipped} files already in _dupes.", []
+
+    # Phase 1: Pre-create all target folders
+    progress(0.1, desc="Creating target folders...")
+    for i, item in enumerate(files_to_move):
         try:
-            # Ensure target folder exists
             target_folder_id = ensure_folder_path(
                 state.service,
                 item["source_path"],
                 dupes_folder_id,
                 folder_cache
             )
-
-            # Move file
-            result = move_file_to_dupes(state.service, item["file_id"], target_folder_id)
-
-            if result["success"]:
-                successful += 1
-                results.append({"path": item["source_path"], "dest": item["dest_path"], "status": "moved"})
-            else:
-                failed += 1
-                results.append({"path": item["source_path"], "status": "failed", "error": result["error"]})
+            item["target_folder_id"] = target_folder_id
         except Exception as e:
             failed += 1
-            results.append({"path": item["source_path"], "status": "failed", "error": str(e)})
+            results.append({"path": item["source_path"], "status": "failed", "error": f"Folder creation failed: {e}"})
+            item["target_folder_id"] = None
+
+    # Filter out files where folder creation failed
+    files_ready = [f for f in files_to_move if f.get("target_folder_id")]
+
+    if not files_ready:
+        save_execution_log(results, dry_run=False)
+        return f"Failed to create target folders for all files. Skipped: {skipped}, Failed: {failed}", []
+
+    # Phase 2: Batch fetch all parent IDs
+    progress(0.3, desc=f"Fetching parent info for {len(files_ready)} files...")
+    file_ids = [item["file_id"] for item in files_ready]
+    parent_map = batch_get_parents(state.service, file_ids)
+
+    # Phase 3: Batch move all files
+    progress(0.5, desc=f"Moving {len(files_ready)} files in batches...")
+    move_requests = []
+    file_id_to_item = {}
+    for item in files_ready:
+        file_id = item["file_id"]
+        target_folder_id = item["target_folder_id"]
+        previous_parents = parent_map.get(file_id, "")
+        move_requests.append((file_id, target_folder_id, previous_parents))
+        file_id_to_item[file_id] = item
+
+    move_results = batch_move_files(state.service, move_requests)
+
+    # Process results
+    progress(0.9, desc="Processing results...")
+    for file_id, result in move_results.items():
+        item = file_id_to_item[file_id]
+        if result["success"]:
+            successful += 1
+            results.append({"path": item["source_path"], "dest": item["dest_path"], "status": "moved"})
+        else:
+            failed += 1
+            results.append({"path": item["source_path"], "status": "failed", "error": result["error"]})
 
     # Save execution log
     save_execution_log(results, dry_run=False)
 
-    # Format results
-    status = f"Execution complete. **Moved:** {successful} | **Failed:** {failed} | **Skipped:** {skipped}"
+    # Format results as table data
+    status = f"Execution complete. **Moved:** {successful} | **Failed:** {failed} | **Skipped:** {skipped} | Log saved to: `{EXECUTION_LOG_FILE}`"
 
-    lines = []
-    for r in results[:50]:
+    table_data = []
+    for r in results:
         if r["status"] == "moved":
-            lines.append(f"MOVED: `{r['path']}`")
+            table_data.append(["MOVED", r["path"], r.get("dest", ""), ""])
         elif r["status"] == "skipped":
-            lines.append(f"SKIPPED: `{r['path']}` - {r.get('reason', '')}")
+            table_data.append(["SKIPPED", r["path"], "", r.get("reason", "")])
         else:
-            lines.append(f"FAILED: `{r['path']}` - {r.get('error', 'Unknown error')}")
+            table_data.append(["FAILED", r["path"], "", r.get("error", "Unknown error")])
 
-    if len(results) > 50:
-        lines.append(f"\n... and {len(results) - 50} more results")
-
-    lines.append(f"\n\nExecution log saved to: `{EXECUTION_LOG_FILE}`")
-
-    return status, "\n".join(lines)
+    return status, table_data
 
 
 # =============================================================================
@@ -1202,7 +1356,11 @@ def create_ui():
                 )
 
                 execution_status = gr.Markdown()
-                execution_results = gr.Markdown()
+                execution_results = gr.Dataframe(
+                    headers=["Status", "Source Path", "Destination Path", "Details"],
+                    datatype=["str", "str", "str", "str"],
+                    interactive=False,
+                )
 
                 gr.Markdown("---")
                 gr.Markdown("### Export Decisions to JSON")
@@ -1228,7 +1386,7 @@ def create_ui():
                 # Execute - requires confirmation
                 def execute_with_confirmation(confirmed: bool):
                     if not confirmed:
-                        return "Please check the confirmation box before executing.", ""
+                        return "Please check the confirmation box before executing.", []
                     return execute_moves(dry_run=False)
 
                 execute_btn.click(
