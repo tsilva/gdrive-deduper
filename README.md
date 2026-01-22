@@ -1,69 +1,165 @@
-# gdrive-deduper
+<div align="center">
+  <img src="logo.png" alt="gdrive-deduper" width="512"/>
 
-Find duplicate files in your Google Drive using MD5 checksums. Fast, read-only, outputs a CSV report.
+  [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
+  [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![Google Drive API](https://img.shields.io/badge/Google%20Drive-API%20v3-4285F4?logo=googledrive&logoColor=white)](https://developers.google.com/drive)
 
-## Setup
+  **Find and manage duplicate files in Google Drive using MD5 checksums**
 
-### 1. Install dependencies
+  [Features](#features) · [Quick Start](#quick-start) · [Configuration](#configuration) · [Usage](#usage)
+</div>
+
+---
+
+## Features
+
+- **Fast MD5-based detection** - Identifies duplicates by comparing file checksums, not just names
+- **Two interfaces** - CLI for quick scans, Web UI for interactive review with file previews
+- **Non-destructive** - Moves duplicates to `/_dupes` folder instead of deleting them
+- **Preserves structure** - Original folder hierarchy is maintained under the dupes folder
+- **Resumable sessions** - Decisions auto-save and persist across sessions
+- **Flexible filtering** - Scan specific paths and exclude folders from analysis
+
+## Quick Start
 
 ```bash
+# Install with uv
 uv sync
+
+# Run a scan (CLI)
+uv run main.py
+
+# Or launch the web UI
+uv run app.py
 ```
 
-### 2. Get Google OAuth credentials (one-time)
+**First run:** A browser window will open for Google OAuth authentication. Grant access to your Google Drive.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or select existing)
-3. Enable the **Google Drive API**:
-   - Go to "APIs & Services" → "Library"
-   - Search "Google Drive API" → Enable
-4. Create OAuth credentials:
-   - Go to "APIs & Services" → "Credentials"
-   - Click "Create Credentials" → "OAuth client ID"
-   - Select "Desktop app"
-   - Download the JSON file
-5. Save the file as `credentials.json` in this folder
+## Installation
 
-> **Note:** If your Cloud project is in "Testing" mode, add your Google account as a test user under "OAuth consent screen" → "Test users".
+### Prerequisites
+
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) package manager
+- Google Cloud OAuth credentials ([setup guide](#google-cloud-setup))
+
+### Google Cloud Setup
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. Create a project (or select existing)
+3. Enable the **Google Drive API**
+4. Create **OAuth 2.0 Client ID** (choose "Desktop app")
+5. Download the JSON file and save as `credentials.json` in the project root
 
 ## Usage
 
+### CLI Tool
+
 ```bash
-# Scan entire Google Drive
+# Scan entire drive
 uv run main.py
 
-# Scan specific folder (recursive)
+# Scan specific folder
 uv run main.py --path "/Photos"
 
-# Custom output file
-uv run main.py --output my_report.csv
+# Exclude folders
+uv run main.py --exclude "/Backup/Old" --exclude "/tmp"
+
+# Custom output location
+uv run main.py --output results.csv
+
+# Validate credentials
+uv run main.py --validate
+
+# Debug logging
+uv run main.py --verbose --log-file debug.log
 ```
 
-On first run, a browser window opens for Google login. Your token is cached in `token.json` for future runs.
+### Web UI
 
-## Output
+```bash
+uv run app.py
+```
 
-Results are saved to `.output/duplicates.csv` with columns:
+The web interface provides three tabs:
 
-| Column | Description |
-|--------|-------------|
-| filename | Name of the file |
-| path1 | Full path of first copy |
-| path2 | Full path of second copy |
-| date1 | Modified date of first copy |
-| date2 | Modified date of second copy |
-| md5 | MD5 checksum |
-| size | File size in bytes |
-| status | `duplicate` or `uncertain` |
+| Tab | Purpose |
+|-----|---------|
+| **Scan** | Run scans with path filtering and progress feedback |
+| **Review** | Side-by-side comparison with file previews, make keep/skip decisions |
+| **Export** | Preview moves (dry run), execute moves, export decisions to JSON |
 
-**Status values:**
-- `duplicate` - Confirmed duplicate (same MD5 and size)
-- `uncertain` - Same MD5 but different size (rare, worth investigating)
+**Note:** PDF preview requires poppler: `brew install poppler` (macOS)
 
-At the end, the script shows potential space savings if duplicates were removed.
+### Moving Duplicates
 
-## Limitations
+Instead of deleting, duplicates are moved to `/_dupes` at Drive root:
 
-- Google Workspace files (Docs, Sheets, Slides) don't have MD5 checksums and are skipped
-- Shared drives are excluded (only scans "My Drive")
-- Read-only: this tool does not delete anything
+```
+/Photos/2024/IMG.jpg  →  /_dupes/Photos/2024/IMG.jpg
+```
+
+1. **Scan** - Find duplicates
+2. **Review** - Mark which files to keep
+3. **Preview** - Dry run to see what would move
+4. **Execute** - Move duplicates to `/_dupes`
+
+## Configuration
+
+Settings can be configured via environment variables, `config.json`, or CLI arguments.
+
+**Precedence:** CLI > Environment > Config file > Defaults
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GDRIVE_CREDENTIALS_PATH` | `credentials.json` | OAuth credentials file |
+| `GDRIVE_TOKEN_PATH` | (next to credentials) | OAuth token file |
+| `GDRIVE_OUTPUT_DIR` | `.output` | Output directory |
+| `GDRIVE_DUPES_FOLDER` | `/_dupes` | Folder for duplicates |
+| `GDRIVE_BATCH_SIZE` | `100` | Batch size for API operations |
+| `GDRIVE_MAX_PREVIEW_MB` | `10` | Max file size for previews |
+| `GDRIVE_EXCLUDE_PATHS` | (none) | Comma-separated paths to exclude |
+
+### Config File
+
+Create `config.json` in the project root:
+
+```json
+{
+  "credentials_path": "~/.config/gdrive-deduper/credentials.json",
+  "output_dir": "~/.local/share/gdrive-deduper",
+  "dupes_folder": "/_dupes",
+  "batch_size": 100,
+  "exclude_paths": ["/Backup/Old", "/tmp"]
+}
+```
+
+## Output Files
+
+| File | Description |
+|------|-------------|
+| `.output/duplicates.csv` | Scan results with duplicate pairs |
+| `.output/decisions.json` | User decisions (auto-saved) |
+| `.output/execution_log.json` | Move operation results |
+| `.output/scan_results.json` | Cached scan data for session resume |
+
+## How It Works
+
+1. **OAuth authentication** - Cached in `token.json` after first login
+2. **Single API call** - Fetches all files with MD5 metadata in one paginated request
+3. **In-memory path resolution** - Builds paths from parent IDs with memoization
+4. **MD5 grouping** - Groups files by checksum to identify duplicates
+5. **Size validation** - Files with same MD5 but different sizes flagged as "uncertain"
+
+**Note:** Google Workspace files (Docs, Sheets, Slides) are skipped as they don't have MD5 checksums.
+
+## Re-authentication
+
+If you previously used this tool with read-only access, delete `token.json` and re-authenticate to grant move permissions.
+
+## License
+
+MIT
