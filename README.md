@@ -1,3 +1,9 @@
+> [!WARNING]
+> ## Archived
+> This project is archived and no longer maintained.
+>
+> Superseded by [dedrive](https://github.com/tsilva/dedrive), a rewrite with improved architecture and features.
+
 <div align="center">
   <img src="logo.png" alt="dedrive" width="512"/>
 
